@@ -4,7 +4,9 @@ import path from 'path';
 import { runWalletMigration } from './migrations/wallet-constraints';
 import { seedCommunity } from './utils/seed-community';
 
-const PUBLIC_PERMISSIONS: Array<{ api: string; singular: string; actions: string[] }> = [
+type PermissionGroup = { api: string; singular: string; actions: string[] };
+
+const PUBLIC_PERMISSIONS: PermissionGroup[] = [
   { api: 'games', singular: 'game', actions: ['find', 'findOne'] },
   { api: 'banners', singular: 'banner', actions: ['find', 'findOne'] },
   { api: 'categories', singular: 'category', actions: ['find', 'findOne'] },
@@ -25,7 +27,11 @@ const PUBLIC_PERMISSIONS: Array<{ api: string; singular: string; actions: string
 
 // Публичный доступ к загруженным медиа: фронтенд берёт url обложек, скриншотов и видео.
 // Без этого populate[Cover] может вернуть только id файла.
-const PUBLIC_UPLOAD_PERMISSIONS = ['plugin::upload.content-api.find', 'plugin::upload.content-api.findOne'];
+const PUBLIC_UPLOAD_ACTIONS: PermissionGroup = {
+  api: 'upload',
+  singular: 'upload',
+  actions: ['find', 'findOne'],
+};
 
 const MIME_MAP: Record<string, string> = {
   '.webp': 'image/webp',
@@ -171,7 +177,7 @@ async function syncFullCatalog(strapi: Core.Strapi) {
     }
   }
 
-  console.log(`[catalog] Синхронизировано игр с обложками: ${CATALOG_GAMES.length}`);
+  strapi.log.info(`[catalog] Синхронизировано игр с обложками: ${CATALOG_GAMES.length}`);
 }
 
 async function seedInitialTariffs(strapi: Core.Strapi) {
@@ -202,13 +208,17 @@ async function seedInitialTariffs(strapi: Core.Strapi) {
   for (const t of tariffs) {
     await strapi.db.query('api::tariff.tariff').create({ data: t });
   }
-  console.log('[seed] Добавлено облачных тарифов: 3');
+  strapi.log.info(`[seed] Добавлено облачных тарифов: ${tariffs.length}`);
 }
+/** Единый формат action для content-type: api::<singular>.<singular>.<action>. */
+function actionOf(singular: string, action: string): string {
+  return `api::${singular}.${singular}.${action}`;
+}
+
 async function ensureRolePermissions(
   strapi: Core.Strapi,
   roleType: string,
-  permissions: Array<{ api: string; singular: string; actions: string[] }>,
-  rawActions: string[] = []
+  groups: PermissionGroup[]
 ) {
   const role = await strapi.db.query('plugin::users-permissions.role').findOne({
     where: { type: roleType },
@@ -220,42 +230,53 @@ async function ensureRolePermissions(
   });
   const existingActions = new Set(existing.map((p: { action: string }) => p.action));
 
-  const toCreate: Array<Promise<unknown>> = [];
-  for (const { singular, actions } of permissions) {
-    for (const action of actions) {
-      const fullAction = `api::${singular}.${singular}.${action}`;
-      if (existingActions.has(fullAction)) continue;
-      toCreate.push(
-        strapi.db.query('plugin::users-permissions.permission').create({
-          data: { action: fullAction, role: role.id },
-        })
-      );
-    }
+  // Дедупликация: один action создаётся ровно один раз.
+  const wanted = new Set<string>();
+  for (const { singular, actions } of groups) {
+    for (const action of actions) wanted.add(actionOf(singular, action));
   }
-  for (const fullAction of rawActions) {
-    if (existingActions.has(fullAction)) continue;
-    toCreate.push(
+
+  const toCreate = [...wanted]
+    .filter((action) => !existingActions.has(action))
+    .map((action) =>
       strapi.db.query('plugin::users-permissions.permission').create({
-        data: { action: fullAction, role: role.id },
+        data: { action, role: role.id },
       })
     );
-  }
+
   await Promise.all(toCreate);
 }
 
+/**
+ * Удаляет только те права, что ссылаются на несуществующий content-type
+ * с «множественной» формой singular (api::games.game.find).
+ * Проверяем реально зарегистрированные uid, а не суффикс «s»:
+ * иначе пострадают легитимные content-types вроде api::event.event и
+ * api::contact.contact... и любые, чей singular заканчивается на «s».
+ */
 async function cleanupInvalidPermissions(strapi: Core.Strapi) {
-  const invalid = await strapi.db
+  const knownUids = new Set(
+    Object.keys(strapi.contentTypes).filter((uid) => uid.startsWith('api::'))
+  );
+
+  const candidates = await strapi.db
     .query('plugin::users-permissions.permission')
     .findMany({ where: { action: { $startsWith: 'api::' } } });
 
-  const wrong = invalid.filter((p: { action: string }) => {
-    const uid = p.action.split('.');
-    return uid.length === 4 && uid[2].endsWith('s');
+  const wrong = candidates.filter((p: { action: string }) => {
+    const parts = p.action.split('.');
+    if (parts.length !== 4) return false;
+    if (knownUids.has(`${parts[0]}.${parts[1]}`)) return false;
+    // Право битое и похоже на plural-опечатку: api::<x>.<x>s.<action>.
+    return parts[1].endsWith('s');
   });
 
-  for (const p of wrong) {
-    await strapi.db.query('plugin::users-permissions.permission').delete({ where: { id: (p as { id: number }).id } });
-  }
+  if (!wrong.length) return;
+
+  await strapi.db.query('plugin::users-permissions.permission').deleteMany({
+    where: { id: { $in: wrong.map((p: { id: number }) => p.id) } },
+  });
+  strapi.log.warn(`[permissions] Удалено некорректных прав: ${wrong.length}`);
 }
 
 export default {
@@ -267,7 +288,8 @@ export default {
     await seedInitialTariffs(strapi);
     await seedCommunity(strapi);
     await cleanupInvalidPermissions(strapi);
-    await ensureRolePermissions(strapi, 'public', PUBLIC_PERMISSIONS, PUBLIC_UPLOAD_PERMISSIONS);
-    await ensureRolePermissions(strapi, 'authenticated', PUBLIC_PERMISSIONS, PUBLIC_UPLOAD_PERMISSIONS);
+    const groups = [...PUBLIC_PERMISSIONS, PUBLIC_UPLOAD_ACTIONS];
+    await ensureRolePermissions(strapi, 'public', groups);
+    await ensureRolePermissions(strapi, 'authenticated', groups);
   },
 };

@@ -10,9 +10,7 @@
  */
 
 import type { Core } from '@strapi/strapi';
-import { errors } from '@strapi/utils';
-
-const { ApplicationError } = errors;
+import { walletError } from '../utils/wallet-errors';
 
 export type TxType = 'deposit' | 'withdraw' | 'purchase' | 'refund';
 
@@ -64,13 +62,13 @@ async function lockWallet(
       walletId,
     ]);
     const row = res?.rows?.[0] ?? res?.[0]?.[0];
-    if (!row) throw new ApplicationError('Кошелёк не найден');
+    if (!row) throw walletError('walletMissing', { walletId });
     // Strapi добавляет префикс таблиц только при заданном tableName prefix.
     return { id: Number(row.id), balance: Number(row.balance) };
   }
 
   const wallet = await strapi.db.query('api::wallet.wallet').findOne({ where: { id: walletId } });
-  if (!wallet) throw new ApplicationError('Кошелёк не найден');
+  if (!wallet) throw walletError('walletMissing', { walletId });
   return { id: Number(wallet.id), balance: Number(wallet.balance ?? 0) };
 }
 
@@ -96,7 +94,7 @@ async function recordTransaction(
     where: { reference: data.reference },
   });
   if (duplicate) {
-    throw new ApplicationError('Транзакция с таким reference уже существует');
+    throw walletError('referenceConflict', { reference: data.reference });
   }
 
   return strapi.db.query('api::transaction.transaction').create({
@@ -141,9 +139,11 @@ async function move(
     const after = before + signedAmount;
 
     if (after < 0) {
-      throw new ApplicationError(
-        `Недостаточно средств: баланс ${before}, требуется ${Math.abs(signedAmount)}`
+      // Баланс и сумма уходят в лог, клиенту — только публичный текст.
+      strapi.log.info(
+        `[wallet] недостаточно средств: walletId=${locked.id} balance=${before} amount=${Math.abs(signedAmount)}`
       );
+      throw walletError('insufficientFunds', { walletId: locked.id });
     }
 
     // Условное обновление: сработает только если баланс не изменился
@@ -156,7 +156,7 @@ async function move(
       });
 
     if (!updated || updated.count === 0) {
-      throw new ApplicationError('Конфликт обновления баланса, повторите операцию');
+      throw walletError('balanceConflict', { walletId: locked.id });
     }
 
     const extraResult = params.extra ? await params.extra(trx, locked.id) : undefined;
@@ -243,13 +243,15 @@ async function purchaseGame(strapi: Core.Strapi, args: PurchaseArgs) {
   const game = await strapi.db.query('api::game.game').findOne({
     where: { $or: [{ documentId: args.gameId }, { id: Number(args.gameId) || -1 }] },
   });
-  if (!game) throw new ApplicationError('Игра не найдена');
+  if (!game) throw walletError('gameMissing', { gameId: args.gameId });
   if (game.purchasable === false) {
-    throw new ApplicationError('Игра недоступна для покупки');
+    throw walletError('gameUnavailable', { gameId: args.gameId });
   }
 
   const price = Number(game.Price ?? 0);
-  if (price < 0) throw new ApplicationError('Некорректная цена игры');
+  if (!Number.isFinite(price) || price < 0) {
+    throw walletError('invalidInput', { gameId: args.gameId });
+  }
 
   const alreadyOwned = await strapi.db.query('api::library-item.library-item').findOne({
     where: {
@@ -259,7 +261,7 @@ async function purchaseGame(strapi: Core.Strapi, args: PurchaseArgs) {
     },
   });
   if (alreadyOwned) {
-    throw new ApplicationError('Игра уже приобретена');
+    throw walletError('alreadyOwned', { gameId: args.gameId, walletId: wallet.id });
   }
 
   const existingTx = await strapi.db.query('api::transaction.transaction').findOne({
@@ -353,11 +355,11 @@ async function reverseTransaction(strapi: Core.Strapi, reference: string) {
     where: { reference },
     populate: { wallet: true, game: true },
   });
-  if (!original) throw new ApplicationError('Транзакция не найдена');
-  if (original.status === 'reversed') throw new ApplicationError('Транзакция уже отменена');
+  if (!original) throw walletError('transactionMissing', { reference });
+  if (original.status === 'reversed') throw walletError('alreadyReversed', { reference });
 
   const walletId = original.wallet?.id;
-  if (!walletId) throw new ApplicationError('У транзакции нет кошелька');
+  if (!walletId) throw walletError('walletMissing', { reference });
 
   return strapi.db.transaction(async (trx) => {
     const locked = await lockWallet(strapi, trx, Number(walletId));

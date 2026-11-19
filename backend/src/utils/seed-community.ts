@@ -4,6 +4,10 @@
  */
 
 interface StrapiLike {
+  log: {
+    info: (message: string) => void;
+    warn: (message: string, meta?: unknown) => void;
+  };
   db: {
     query: (uid: string) => {
       count: () => Promise<number>;
@@ -163,9 +167,9 @@ export async function seedCommunity(strapi: StrapiLike) {
       for (const item of data) {
         await db.query(uid).create({ data: item });
       }
-      console.log(`[seed-community] добавлено ${data.length} записей в ${uid}`);
+      strapi.log.info(`[seed-community] добавлено ${data.length} записей в ${uid}`);
     } catch (err) {
-      console.error(`[seed-community] не удалось заполнить ${uid}:`, err);
+      strapi.log.warn(`[seed-community] не удалось заполнить ${uid}`, err);
     }
   }
 }

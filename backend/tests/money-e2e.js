@@ -77,7 +77,8 @@ async function main() {
   assert(b.body.data.balance === a.body.data.balance, 'повторный deposit не начислил дважды');
 
   const bad = await api('/wallets/withdraw', { method: 'POST', body: JSON.stringify({ amount: 9_999_999 }) });
-  assert(bad.status === 400, 'списание больше баланса отклонено');
+  assert(bad.status === 402, `списание больше баланса отклонено (402, got ${bad.status})`);
+  assert(!String(bad.body?.error?.message ?? '').includes('баланс '), 'текст ошибки не раскрывает баланс');
 
   // Параллельные покупки — отдельный пользователь с достаточным балансом.
   await register(20_000);
@@ -130,7 +131,7 @@ async function main() {
     method: 'POST',
     body: JSON.stringify({ gameId, reference: `e2e_again_${Date.now()}` }),
   });
-  assert(again.status === 400, 'повторная покупка той же игры отклонена');
+  assert(again.status === 409, `повторная покупка той же игры отклонена (409, got ${again.status})`);
 
   const wallet = (await api('/wallets/me')).body.data;
   assert(wallet.transactions.length >= 2, `журнал транзакций заполнен (${wallet.transactions.length})`);

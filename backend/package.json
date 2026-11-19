@@ -7,6 +7,7 @@
     "build": "strapi build",
     "console": "strapi console",
     "deploy": "strapi deploy",
+    "prepare:types": "strapi ts:generate-types",
     "dev": "strapi develop",
     "develop": "strapi develop",
     "seed:example": "node ./scripts/seed.js",
@@ -43,3 +44,4 @@
     "installId": "d9c1a818207d87316c544efb9a1c60d4263ebe196d43dbc4d5cb939c897668ce"
   }
 }
+

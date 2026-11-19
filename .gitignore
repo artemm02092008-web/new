@@ -30,3 +30,16 @@ yarn-debug.log*
 yarn-error.log*
 .DS_Store
 Thumbs.db
+
+# Strapi runtime state
+.strapi-updater.json
+backend/.strapi-updater.json
+
+# Office temp/lock files (~$Report.docx) и сами отчёты
+~$*
+*.docx
+!docs/**/*.docx
+
+# Debug scripts and local artefacts
+topup.js
+**/topup.js

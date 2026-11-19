@@ -67,7 +67,14 @@ async function main() {
     headers: auth,
     body: JSON.stringify({ amount: -100 }),
   });
-  assert(incorrect.status === 400, 'отрицательное пополнение отклонено');
+  assert(incorrect.status === 422, 'отрицательное пополнение отклонено (422)');
+
+  const forbidden = await fetch(`${FRONT}/api/wallet/wallets/anything`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({}),
+  });
+  assert(forbidden.status === 403, 'неизвестный путь прокси запрещён (403)');
 
   console.log('\nПрокси работает корректно.');
 }
